@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <title>Document</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>
+      var div = document.querySelector("#app");
+
+      function CallbackQueue() {
+        const q = [];
+        return {
+          clearQ() {
+            q.length = 0;
+          },
+          enqueue(fn) {
+            q.push(fn);
+          },
+          flush(i) {
+            const _q = q.slice();
+            let errThown;
+            try {
+              errThown = true;
+              for (i = i === undefined ? 0 : i; i < _q.length; i++) {
+                q[i].call(undefined);
+              }
+              errThown = false;
+            } finally {
+              if (errThown) {
+                this.flush(i + 1);
+              } else {
+                this.clearQ();
+              }
+            }
+          }
+        };
+      }
+
+      var hooks = {
+        componentDidMount: CallbackQueue(),
+        UpdateQueue: CallbackQueue()
+      };
+
+      function Component(props) {
+        this.props = props;
+      }
+
+      Object.assign(Component.prototype, {
+        bereactor: {},
+        setState(o) {
+          const s =
+            (this._nextState !== this.state && this._nextState) ||
+            (this._nextState = Object.assign({}, this.state));
+          if (typeof o !== "function" || (o = o(s, this.props))) {
+            Object.assign(s, o);
+          }
+          updateComponent(this.__internal_instance__);
+        }
+      });
+
+      function updateComponent(ins) {
+        hooks.UpdateQueue.clearQ();
+        ins.receiveElement(ins.currentElement);
+        hooks.UpdateQueue.flush();
+      }
+
+      function createElement(type, conf) {
+        const props = Object.assign({}, conf);
+        if (arguments.length > 2) {
+          const children = [].slice.call(arguments, 2);
+          props.children = children;
+        }
+
+        return {
+          type,
+          props,
+          $$typeof: "bereactor"
+        };
+      }
+
+      function render(element, container) {
+        hooks.componentDidMount.clearQ();
+        const ins = instantiateComponent(element);
+        const node = ins.mountComponent();
+        container.appendChild(node);
+        hooks.componentDidMount.flush();
+        return ins.publicInstance;
+      }
+
+      function instantiateComponent(element) {
+        let ins;
+        if (
+          element === true ||
+          element === false ||
+          element === null ||
+          element === undefined
+        ) {
+          ins = new EmptyComponent(element);
+        } else if (typeof element === "string") {
+          ins = new TextComponent(element);
+        } else if (typeof element === "object") {
+          if (typeof element.type === "string") {
+            ins = new DomComponent(element);
+          } else if (typeof element.type === "function") {
+            ins = new CompositeComponent(element);
+          }
+        }
+        return ins;
+      }
+
+      function CompositeComponent(element) {
+        this.name = "CompositeComponent";
+        this.currentElement = element;
+        this.renderedComponent = null;
+        this.publicInstance = null;
+      }
+
+      Object.assign(CompositeComponent.prototype, {
+        instantiateComponent,
+        getDomNode() {
+          return this.renderedComponent.getDomNode();
+        },
+        unmountComponent() {
+          const ins = this.publicInstance;
+          if (ins && ins.componentWillUnmount) {
+            ins.componentWillUnmount();
+          }
+          const renderedComponent = this.renderedComponent;
+          renderedComponent.unmountComponent();
+        },
+
+        mountComponent() {
+          const element = this.currentElement;
+          const type = element.type;
+          const props = element.props;
+          let publicInstance;
+          let renderedElement;
+
+          if (
+            type.prototype &&
+            type.prototype.bereactor === Component.prototype.bereactor
+          ) {
+            publicInstance = new type(props);
+            publicInstance.props = props;
+            publicInstance.__internal_instance__ = this;
+            if (publicInstance.componentWillMount) {
+              publicInstance.componentWillMount();
+            }
+
+            renderedElement = publicInstance.render();
+          } else {
+            publicInstance = null;
+            renderedElement = type(props);
+          }
+
+          this.publicInstance = publicInstance;
+
+          const renderedComponent = this.instantiateComponent(renderedElement);
+          this.renderedComponent = renderedComponent;
+
+          const node = renderedComponent.mountComponent();
+
+          if (publicInstance && publicInstance.componentDidMount) {
+            hooks.componentDidMount.enqueue(
+              publicInstance.componentDidMount.bind(
+                publicInstance.componentDidMount
+              )
+            );
+          }
+
+          return node;
+        },
+        receiveElement(nextElement) {
+          const ins = this.publicInstance;
+          const prevProps = this.currentElement.props;
+          const prevState = ins.state;
+          const prevRenderedComponent = this.renderedComponent;
+          const prevRenderedElement = prevRenderedComponent.currentElement;
+
+          ins.state = ins._nextState || ins.state || {};
+          this.currentElement = nextElement;
+
+          delete ins._nextState;
+
+          const type =
+            nextElement !== null && typeof nextElement === "object"
+              ? nextElement.type
+              : nextElement;
+          const nextProps =
+            nextElement !== null && typeof nextElement === "object"
+              ? nextElement.props
+              : {};
+
+          let nextRenderedElement;
+          if (
+            typeof type === "function" &&
+            type.prototype.bereactor === Component.prototype.bereactor
+          ) {
+            if (ins.componentWillUpdate) {
+              ins.componentWillUpdate(nextProps, ins.state);
+            }
+            ins.props = nextProps;
+            nextRenderedElement = ins.render();
+          } else if (typeof type === "function") {
+            nextRenderedElement = type(nextProps);
+          }
+          if (
+            nextRenderedElement !== null &&
+            typeof nextRenderedElement === "object" &&
+            nextRenderedElement.type === prevRenderedElement.type
+          ) {
+            prevRenderedComponent.receiveElement(nextRenderedElement);
+            return;
+          }
+          const prevNode = this.getDomNode();
+          prevRenderedComponent.unmountComponent();
+
+          const nextRenderedComponent = this.instantiateComponent(
+            nextRenderedElement
+          );
+
+          const nextNode = nextRenderedComponent.mountComponent();
+
+          this.renderedComponent = nextRenderedComponent;
+
+          prevNode.parentNode.replaceChild(nextNode, prevNode);
+
+          if (ins && ins.componentDidUpdate) {
+            hooks.UpdateQueue.enqueue(ins.componentDidUpdate.bind(this));
+          }
+        }
+      });
+
+      function EmptyComponent(element) {
+        this.currentElement = element;
+        this.node = null;
+      }
+
+      Object.assign(EmptyComponent.prototype, {
+        instantiateComponent,
+        getDomNode() {
+          return this.node;
+        },
+        unmountComponent() {},
+        mountComponent() {
+          const element = this.currentElement;
+          const node = (this.node = document.createComment(
+            "用一段注释糊弄一下好了"
+          ));
+          return node;
+        },
+        receiveElement() {}
+      });
+
+      function TextComponent(element) {
+        this.currentElement = element;
+        this.node = null;
+      }
+
+      Object.assign(TextComponent.prototype, {
+        instantiateComponent,
+        getDomNode() {
+          return this.node;
+        },
+        unmountComponent() {},
+        mountComponent() {
+          const element = this.currentElement;
+          const node = (this.node = document.createTextNode(element));
+          return node;
+        },
+        receiveElement() {}
+      });
+
+      // 将DOM element转为内部的DomComponentInternal表示
+      function DomComponent(element) {
+        this.name = "DomComponent";
+        this.currentElement = element;
+        this.renderedChildren = null;
+        this.node = null;
+      }
+
+      Object.assign(DomComponent.prototype, {
+        instantiateComponent,
+        // mountComponent 方法返回Node类型元素，可以被appendChild。
+        mountComponent() {
+          const element = this.currentElement;
+          const type = element.type;
+          const props = element.props;
+          const children = props.children;
+
+          const node = (this.node = document.createElement(type));
+
+          Object.keys(props).forEach(propName => {
+            const m = propName.match(/on(\w+)/i);
+            if (m) {
+              const eventName = m[1].toLowerCase();
+              node.addEventListener(eventName, props[propName].bind(this));
+              return;
+            }
+            if (propName !== "children") {
+              node.setAttribute(propName, props[propName]);
+            }
+          });
+
+          if (children && children.length) {
+            for (let i = 0, l = children.length; i < l; i++) {
+              const child = children[i];
+              if (!this.renderedChildren) {
+                this.renderedChildren = [];
+              }
+              this.renderedChildren[i] = this.instantiateComponent(child);
+            }
+            const childrenDom = this.renderedChildren.map(child =>
+              child.mountComponent(node)
+            );
+            childrenDom.forEach(cdom => {
+              node.appendChild(cdom);
+            });
+          }
+          return node;
+        },
+        getDomNode() {
+          return this.node;
+        },
+        unmountComponent() {
+          const renderedChildren = this.renderedChildren;
+          renderedChildren.forEach(child => {
+            child.unmountComponent();
+          });
+        },
+        receiveElement(nextElement) {
+          const node = this.node;
+          const prevElement = this.currentElement;
+          const prevProps = prevElement.props;
+          const nextProps = nextElement.props;
+
+          this.currentElement = nextElement;
+
+          Object.keys(prevProps).forEach(propName => {
+            if (
+              propName !== "children" &&
+              !nextProps.hasOwnProperty(propName)
+            ) {
+              node.removeAttribute(propName);
+            }
+          });
+          Object.keys(nextProps).forEach(propName => {
+            if (propName !== "children") {
+              node.setAttribute(propName, nextProps[propName]);
+            }
+          });
+
+          const prevChildren = prevProps.children || [];
+          if (!Array.isArray(prevChildren)) {
+            prevChildren = [prevChildren];
+          }
+          const nextChildren = nextProps.children || [];
+          if (!Array.isArray(nextChildren)) {
+            nextChildren = [nextChildren];
+          }
+
+          const prevRenderedChildren = this.renderedChildren || [];
+          const nextRenderedChildren = [];
+
+          for (let i = 0; i < nextChildren.length; i++) {
+            const prevChild = prevRenderedChildren[i];
+
+            if (!prevChild) {
+              const nextChild = this.instantiateComponent(nextChildren[i]);
+              const childNode = nextChild.mountComponent(node);
+              nextRenderedChildren.push(nextChild);
+
+              node.appendChild(childNode);
+              continue;
+            }
+            const canUpdate = (() => {
+              if (prevChildren[i] === null && nextChildren[i] === null) {
+                return true;
+              } else if (
+                typeof prevChildren[i] === "string" &&
+                typeof nextChildren[i] === "string"
+              ) {
+                return prevChildren[i] === nextChildren[i];
+              } else if (
+                typeof prevChildren[i] === "object" &&
+                typeof nextChildren[i] === "object"
+              ) {
+                return prevChildren[i].type === nextChildren[i].type;
+              } else {
+                return false;
+              }
+            })();
+
+            if (!canUpdate) {
+              const prevNode = prevChild.getDomNode();
+              prevChild.unmountComponent();
+              const nextChild = this.instantiateComponent(nextChildren[i]);
+              const nextNode = nextChild.mountComponent(node);
+              nextRenderedChildren.push(nextChild);
+              node.replaceChild(nextNode, prevNode);
+              continue;
+            }
+
+            prevChild.receiveElement(nextChildren[i]);
+            nextRenderedChildren.push(prevChild);
+          }
+
+          for (
+            let j = nextRenderedChildren.length;
+            j < prevRenderedChildren.length;
+            j++
+          ) {
+            const prevChild = prevRenderedChildren[j];
+            const prevNode = prevChild.getDomNode();
+            prevChild.unmountComponent();
+            node.removeChild(prevNode);
+          }
+
+          this.renderedChildren = nextRenderedChildren;
+        }
+      });
+    </script>
+    <script>
+      class App extends Component {
+        constructor(props) {
+          super(props);
+          this.state = {
+            greeting: "Hello world"
+          };
+        }
+        componentWillMount() {
+          console.log("App componentWillMount");
+        }
+        componentDidMount() {
+          console.log("App componentDidMount");
+        }
+        componentDidUpdate() {
+          console.log("App componentDidUpdate");
+        }
+        render() {
+          return createElement(
+            "div",
+            { style: "color: skyblue;" },
+            this.state.greeting,
+            createElement("input", {
+              onInput: e => {
+                this.setState({
+                  greeting: e.target.value
+                });
+              }
+            }),
+            createElement(ChildCompo, {
+              greeting: this.state.greeting
+                .split("")
+                .reverse()
+                .join("")
+            })
+          );
+        }
+      }
+
+      class ChildCompo extends Component {
+        constructor(props) {
+          super(props);
+        }
+        componentWillMount() {
+          console.log("ChildCompo componentWillMount");
+        }
+        componentDidMount() {
+          console.log("ChildCompo componentDidMount");
+        }
+        render() {
+          return createElement(
+            "div",
+            { id: "test", style: "color: pink;" },
+            "我是子节点",
+            "这是传入的props",
+            this.props.greeting
+          );
+        }
+      }
+      const app = render(
+        createElement(App, null),
+        document.querySelector("#app")
+      );
+    </script>
+  </body>
+</html>
